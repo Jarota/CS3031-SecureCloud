@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -41,15 +42,17 @@ func main() {
 
 	//send cloud the public key
 	conn.Write(publicKey)
-	conn.Write([]byte("\n"))
 
 	//receive cloud's public key
-	cloudKey, err := bufio.NewReader(conn).ReadString('\n')
+	var cloudKey = make([]byte, 64)
+	n, err := conn.Read(cloudKey)
 	check(err)
+	if n != 64 {
+		panic(errors.New("Cloud's public key not properly received."))
+	}
 
 	//calculate shared key
-	cloudKeyBytes := []byte(cloudKey)
-	sharedKey := GenerateSharedSecret(privateKey, cloudKeyBytes[:len(cloudKey)-1], curve)
+	sharedKey := GenerateSharedSecret(privateKey, cloudKey, curve)
 
 	//use first 32 bytes (x coordinate) of shared key as aes cipher block key
 	cipher, err := aes.NewCipher(sharedKey[:32])
@@ -80,11 +83,14 @@ func main() {
 	conn.Write([]byte("\n"))
 
 	//throw away ack
-	_, err = bufio.NewReader(conn).ReadString('\n')
+	_, err = conn.Read(make([]byte, 8))
 	check(err)
 
 	//send encrypted message to cloud
 	conn.Write(encrypted)
 	conn.Write([]byte("\n"))
 
+	//close the connection
+	err = conn.Close()
+	check(err)
 }

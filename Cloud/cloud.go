@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -36,16 +37,19 @@ func handleConnection(conn net.Conn) {
 	publicKey := append(xBytes, yBytes...)
 
 	//receive user's public key
-	userKey, err := bufio.NewReader(conn).ReadString('\n')
+	var userKey = make([]byte, 64)
+	n, err := conn.Read(userKey)
 	check(err)
+	if n != 64 {
+		fmt.Println(n)
+		panic(errors.New("User's public key not properly received."))
+	}
 
 	//send the public key to user
 	conn.Write(publicKey)
-	conn.Write([]byte("\n"))
 
 	//calculate shared key
-	userKeyBytes := []byte(userKey)
-	sharedKey := GenerateSharedSecret(privateKey, userKeyBytes[:len(userKey)-1], curve)
+	sharedKey := GenerateSharedSecret(privateKey, userKey, curve)
 
 	//use first 32 bytes (x coordinate) of shared key as aes cipher block key
 	cipher, err := aes.NewCipher(sharedKey[:32])
@@ -58,7 +62,7 @@ func handleConnection(conn net.Conn) {
 	check(err)
 
 	//send ack
-	conn.Write([]byte("ack\n"))
+	conn.Write([]byte("ack"))
 
 	//receive encrypted message from user
 	encryptedString, err := bufio.NewReader(conn).ReadString('\n')
@@ -81,9 +85,9 @@ func handleConnection(conn net.Conn) {
 }
 
 func main() {
-	userKeys, err := os.Open("keys.txt")
+	userKeys, err := os.Open("keys.csv")
 	if os.IsNotExist(err) {
-		userKeys, err = os.Create("keys.txt")
+		userKeys, err = os.Create("keys.csv")
 		check(err)
 	} else {
 		check(err)
