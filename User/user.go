@@ -3,9 +3,9 @@ package main
 import (
 	"bufio"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/elliptic"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -19,11 +19,48 @@ func check(e error) {
 	}
 }
 
+func transmissionError(conn net.Conn) {
+	fmt.Println("Error in received bytes")
+	//close the connection
+	err := conn.Close()
+	check(err)
+	fmt.Println("Connection Closed")
+}
+
 func GenerateSharedSecret(privateKey []byte, publicKey []byte, curve elliptic.Curve) []byte {
 	publicX := new(big.Int).SetBytes(publicKey[:32])
 	publicY := new(big.Int).SetBytes(publicKey[32:])
 	sharedX, sharedY := curve.ScalarMult(publicX, publicY, privateKey)
 	return elliptic.Marshal(curve, sharedX, sharedY)
+}
+
+func encryptAndSend(conn net.Conn, msg []byte, cipher cipher.Block) {
+	//calculate and init padding
+	length := len(msg)
+	padding := 16 - (length % 16)
+	zeros := make([]byte, padding)
+
+	//add padding to msg buffer
+	msg = append(msg, zeros...)
+	encrypted := make([]byte, length+padding)
+
+	//encrypt msg
+	for i := 0; i < length+padding; i += 16 {
+		cipher.Encrypt(encrypted[i:i+16], msg[i:i+16])
+	}
+
+	//send message length to cloud
+	conn.Write([]byte(strconv.Itoa(length)))
+	conn.Write([]byte("\n"))
+
+	//throw away ack
+	_, err := conn.Read(make([]byte, 8))
+	check(err)
+
+	//send encrypted message to cloud
+	conn.Write(encrypted)
+	conn.Write([]byte("\n"))
+
 }
 
 func main() {
@@ -48,7 +85,8 @@ func main() {
 	n, err := conn.Read(cloudKey)
 	check(err)
 	if n != 64 {
-		panic(errors.New("Cloud's public key not properly received."))
+		transmissionError(conn)
+		return
 	}
 
 	//calculate shared key
@@ -64,31 +102,7 @@ func main() {
 	scanner.Scan()
 	msg := scanner.Bytes()
 
-	//calculate and init padding
-	length := len(msg)
-	padding := 16 - (length % 16)
-	zeros := make([]byte, padding)
-
-	//add padding to msg buffer
-	msg = append(msg, zeros...)
-	encrypted := make([]byte, length+padding)
-
-	//encrypt msg
-	for i := 0; i < length+padding; i += 16 {
-		cipher.Encrypt(encrypted[i:i+16], msg[i:i+16])
-	}
-
-	//send message length to cloud
-	conn.Write([]byte(strconv.Itoa(length)))
-	conn.Write([]byte("\n"))
-
-	//throw away ack
-	_, err = conn.Read(make([]byte, 8))
-	check(err)
-
-	//send encrypted message to cloud
-	conn.Write(encrypted)
-	conn.Write([]byte("\n"))
+	encryptAndSend(conn, msg, cipher)
 
 	//close the connection
 	err = conn.Close()

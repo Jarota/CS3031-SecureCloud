@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
@@ -19,11 +20,54 @@ func check(e error) {
 	}
 }
 
+func transmissionError(conn net.Conn) {
+	fmt.Println("Error in received bytes")
+	//close the connection
+	err := conn.Close()
+	check(err)
+	fmt.Println("Connection Closed")
+}
+
 func GenerateSharedSecret(privateKey []byte, publicKey []byte, curve elliptic.Curve) []byte {
 	publicX := new(big.Int).SetBytes(publicKey[:32])
 	publicY := new(big.Int).SetBytes(publicKey[32:])
 	sharedX, sharedY := curve.ScalarMult(publicX, publicY, privateKey)
 	return elliptic.Marshal(curve, sharedX, sharedY)
+}
+
+func receiveAndDecrypt(conn net.Conn, cipher cipher.Block) ([]byte, error) {
+	//receive message length from user
+	lengthString, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	lengthNoPadding, err := strconv.Atoi(lengthString[:len(lengthString)-1])
+	if err != nil {
+		return nil, err
+	}
+
+	//send ack
+	conn.Write([]byte("ack"))
+
+	//receive encrypted message from user
+	encryptedString, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+
+	//decrypt msg
+	encrypted := []byte(encryptedString)
+	length := len(encrypted) - 1
+
+	if length%16 != 0 {
+		return nil, errors.New("invalid message length")
+	}
+
+	msg := make([]byte, length)
+	for i := 0; i < length; i += 16 {
+		cipher.Decrypt(msg[i:i+16], encrypted[i:i+16])
+	}
+	return msg[:lengthNoPadding], nil
 }
 
 func handleConnection(conn net.Conn) {
@@ -41,8 +85,8 @@ func handleConnection(conn net.Conn) {
 	n, err := conn.Read(userKey)
 	check(err)
 	if n != 64 {
-		fmt.Println(n)
-		panic(errors.New("User's public key not properly received."))
+		transmissionError(conn)
+		return
 	}
 
 	//send the public key to user
@@ -55,28 +99,17 @@ func handleConnection(conn net.Conn) {
 	cipher, err := aes.NewCipher(sharedKey[:32])
 	check(err)
 
-	//receive message length from user
-	lengthString, err := bufio.NewReader(conn).ReadString('\n')
-	check(err)
-	lengthNoPadding, err := strconv.Atoi(lengthString[:len(lengthString)-1])
-	check(err)
-
-	//send ack
-	conn.Write([]byte("ack"))
-
-	//receive encrypted message from user
-	encryptedString, err := bufio.NewReader(conn).ReadString('\n')
-	check(err)
-
-	//decrypt msg
-	encrypted := []byte(encryptedString)
-	length := len(encrypted) - 1
-	msg := make([]byte, length)
-	for i := 0; i < length; i += 16 {
-		cipher.Decrypt(msg[i:i+16], encrypted[i:i+16])
+	msg, err := receiveAndDecrypt(conn, cipher)
+	if err != nil {
+		if err.Error() == "invalid message length" {
+			transmissionError(conn)
+			return
+		} else {
+			check(err)
+		}
 	}
 
-	fmt.Println("Message received:", string(msg[:lengthNoPadding]))
+	fmt.Println("Message received:", string(msg))
 
 	//close the connection
 	err = conn.Close()
