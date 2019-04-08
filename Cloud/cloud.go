@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"net"
 	"os"
@@ -28,7 +29,7 @@ func transmissionError(conn net.Conn) {
 	fmt.Println("Connection Closed")
 }
 
-func initKeysCSV() {
+func initKeysFile() {
 	fmt.Println("Initializing keys.txt")
 	//make the file
 	keys, err := os.Create("keys.txt")
@@ -79,46 +80,39 @@ func GenerateSharedSecret(privateKey []byte, publicKey []byte, curve elliptic.Cu
 	return elliptic.Marshal(curve, sharedX, sharedY)
 }
 
-func receiveAndDecrypt(conn net.Conn, cipher cipher.Block) ([]byte, error) {
-	//receive message length from user
-	lengthString, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-	lengthNoPadding, err := strconv.Atoi(lengthString[:len(lengthString)-1])
-	if err != nil {
-		return nil, err
-	}
+func encryptAndSend(conn net.Conn, msg []byte, cipher cipher.Block) {
+	//calculate and init padding
+	length := len(msg)
+	padding := 16 - (length % 16)
+	zeros := make([]byte, padding)
 
-	//send ack
-	conn.Write([]byte("ack"))
+	//add padding to msg buffer
+	msg = append(msg, zeros...)
+	encrypted := make([]byte, length+padding)
 
-	//receive encrypted message from user
-	encryptedString, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		return nil, err
+	//encrypt msg
+	for i := 0; i < length+padding; i += 16 {
+		cipher.Encrypt(encrypted[i:i+16], msg[i:i+16])
 	}
 
-	//decrypt msg
-	encrypted := []byte(encryptedString)
-	length := len(encrypted) - 1
+	//send message length to cloud
+	conn.Write([]byte(strconv.Itoa(length)))
+	conn.Write([]byte("\n"))
 
-	if length%16 != 0 {
-		return nil, errors.New("invalid message length")
-	}
+	//throw away ack
+	_, err := conn.Read(make([]byte, 8))
+	check(err)
 
-	msg := make([]byte, length)
-	for i := 0; i < length; i += 16 {
-		cipher.Decrypt(msg[i:i+16], encrypted[i:i+16])
-	}
-	return msg[:lengthNoPadding], nil
+	//send encrypted message to cloud
+	conn.Write(encrypted)
+	conn.Write([]byte("\n"))
 }
 
 func handleConnection(conn net.Conn) {
 	curve := elliptic.P256()
 
 	//open keys file
-	keysFile, err := os.OpenFile("keys.txt", os.O_RDWR|os.O_APPEND, 0666)
+	keysFile, err := os.OpenFile("keys.txt", os.O_RDWR|os.O_APPEND, 0777)
 	check(err)
 
 	//retrieve cloud's public and private keys
@@ -159,8 +153,8 @@ func handleConnection(conn net.Conn) {
 	//ecdhke
 	if !inGroup {
 		if addKeyToGroup(userKey) {
-			//send the public key to user
-			conn.Write(publicKey)
+			//fmt.Println("Adding new user!")
+
 			//calculate shared key
 			sharedKey = GenerateSharedSecret(privateKey, userKey, curve)
 
@@ -170,25 +164,33 @@ func handleConnection(conn net.Conn) {
 			_, err = keysFile.Write(sharedKey)
 			check(err)
 		} else {
+			//encrypt using private key
 			sharedKey = privateKey
 		}
 	}
+
+	//send the public key to user
+	n, e := conn.Write(publicKey)
+	check(e)
+	if n != 64 {
+		transmissionError(conn)
+		return
+	}
+	//throw away ack
+	_, err = conn.Read(make([]byte, 8))
+	check(err)
 
 	//use first 32 bytes (x coordinate) of shared key as aes cipher block key
 	cipher, err := aes.NewCipher(sharedKey[:32])
 	check(err)
 
-	msg, err := receiveAndDecrypt(conn, cipher)
-	if err != nil {
-		if err.Error() == "invalid message length" {
-			transmissionError(conn)
-			return
-		} else {
-			check(err)
-		}
-	}
+	//read file bytes
+	msg, err := ioutil.ReadFile("image.jpg")
+	check(err)
 
-	fmt.Println("Message received:", string(msg))
+	//send file to user
+	encryptAndSend(conn, msg, cipher)
+	fmt.Println("File Sent")
 
 	//close the connection
 	err = conn.Close()
@@ -198,9 +200,9 @@ func handleConnection(conn net.Conn) {
 
 func main() {
 	//check for keys file
-	_, err := os.Open("keys.csv")
+	_, err := os.Open("keys.txt")
 	if os.IsNotExist(err) {
-		initKeysCSV()
+		initKeysFile()
 	} else {
 		check(err)
 	}

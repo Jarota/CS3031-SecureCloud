@@ -6,7 +6,9 @@ import (
 	"crypto/cipher"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"net"
 	"os"
@@ -27,42 +29,13 @@ func transmissionError(conn net.Conn) {
 	fmt.Println("Connection Closed")
 }
 
-func GenerateSharedSecret(privateKey []byte, publicKey []byte, curve elliptic.Curve) []byte {
-	publicX := new(big.Int).SetBytes(publicKey[:32])
-	publicY := new(big.Int).SetBytes(publicKey[32:])
-	sharedX, sharedY := curve.ScalarMult(publicX, publicY, privateKey)
-	return elliptic.Marshal(curve, sharedX, sharedY)
-}
-
-func encryptAndSend(conn net.Conn, msg []byte, cipher cipher.Block) {
-	//calculate and init padding
-	length := len(msg)
-	padding := 16 - (length % 16)
-	zeros := make([]byte, padding)
-
-	//add padding to msg buffer
-	msg = append(msg, zeros...)
-	encrypted := make([]byte, length+padding)
-
-	//encrypt msg
-	for i := 0; i < length+padding; i += 16 {
-		cipher.Encrypt(encrypted[i:i+16], msg[i:i+16])
-	}
-
-	//send message length to cloud
-	conn.Write([]byte(strconv.Itoa(length)))
-	conn.Write([]byte("\n"))
-
-	//throw away ack
-	_, err := conn.Read(make([]byte, 8))
+func initKeysFile() {
+	fmt.Println("Initializing keys.txt")
+	//make the file
+	keys, err := os.Create("keys.txt")
 	check(err)
+	defer keys.Close()
 
-	//send encrypted message to cloud
-	conn.Write(encrypted)
-	conn.Write([]byte("\n"))
-}
-
-func main() {
 	//key generation
 	curve := elliptic.P256()
 	privateKey, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
@@ -72,6 +45,80 @@ func main() {
 	yBytes := y.Bytes()
 	publicKey := append(xBytes, yBytes...)
 
+	//write private and public keys to file
+	n, err := keys.Write(privateKey)
+	if n != 32 {
+		panic(errors.New("Error writing private key"))
+	}
+	check(err)
+	n, err = keys.Write(publicKey)
+	if n != 64 {
+		panic(errors.New("Error writing public key"))
+	}
+	check(err)
+}
+
+func GenerateSharedSecret(privateKey []byte, publicKey []byte, curve elliptic.Curve) []byte {
+	publicX := new(big.Int).SetBytes(publicKey[:32])
+	publicY := new(big.Int).SetBytes(publicKey[32:])
+	sharedX, sharedY := curve.ScalarMult(publicX, publicY, privateKey)
+	return elliptic.Marshal(curve, sharedX, sharedY)
+}
+
+func receiveAndDecrypt(conn net.Conn, cipher cipher.Block) ([]byte, error) {
+	//receive message length from user
+	lengthString, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	lengthNoPadding, err := strconv.Atoi(lengthString[:len(lengthString)-1])
+	if err != nil {
+		return nil, err
+	}
+
+	//send ack
+	conn.Write([]byte("ack"))
+
+	padding := 16 - (lengthNoPadding % 16)
+	length := lengthNoPadding + padding
+	//receive encrypted message from user
+	encrypted := make([]byte, length)
+	n, err := conn.Read(encrypted)
+	check(err)
+	if n != length {
+		return nil, errors.New("invalid message length")
+	}
+
+	msg := make([]byte, length)
+	for i := 0; i < length; i += 16 {
+		cipher.Decrypt(msg[i:i+16], encrypted[i:i+16])
+	}
+	return msg[:lengthNoPadding], nil
+}
+
+func main() {
+	//check for keys file
+	_, err := os.Open("keys.txt")
+	if os.IsNotExist(err) {
+		initKeysFile()
+	} else {
+		check(err)
+	}
+
+	//open keys file
+	keysFile, err := os.OpenFile("keys.txt", os.O_RDWR|os.O_APPEND, 0777)
+	check(err)
+	defer keysFile.Close()
+
+	//retrieve user's public and private keys
+	privateKey := make([]byte, 32)
+	_, err = keysFile.Read(privateKey)
+	check(err)
+
+	publicKey := make([]byte, 64)
+	_, err = keysFile.ReadAt(publicKey, 32)
+	check(err)
+
 	//connect to cloud
 	conn, err := net.Dial("tcp", "localhost:8080")
 	check(err)
@@ -80,28 +127,38 @@ func main() {
 	conn.Write(publicKey)
 
 	//receive cloud's public key
-	var cloudKey = make([]byte, 64)
+	cloudKey := make([]byte, 64)
 	n, err := conn.Read(cloudKey)
 	check(err)
 	if n != 64 {
+		fmt.Println("138")
 		transmissionError(conn)
 		return
 	}
 
+	//ack cloud's public key
+	conn.Write([]byte("ack"))
+
 	//calculate shared key
-	sharedKey := GenerateSharedSecret(privateKey, cloudKey, curve)
+	sharedKey := GenerateSharedSecret(privateKey, cloudKey, elliptic.P256())
 
 	//use first 32 bytes (x coordinate) of shared key as aes cipher block key
 	cipher, err := aes.NewCipher(sharedKey[:32])
 	check(err)
 
-	//read message from console
-	fmt.Print("Message to encrypt: ")
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	msg := scanner.Bytes()
+	msg, err := receiveAndDecrypt(conn, cipher)
+	if err != nil {
+		if err.Error() == "invalid message length" {
+			fmt.Println("153")
+			transmissionError(conn)
+			return
+		} else {
+			check(err)
+		}
+	}
 
-	encryptAndSend(conn, msg, cipher)
+	//dump received bytes into image
+	err = ioutil.WriteFile("image.jpg", msg, 0777)
 
 	//close the connection
 	err = conn.Close()
