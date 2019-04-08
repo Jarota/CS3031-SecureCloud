@@ -60,7 +60,6 @@ func encryptAndSend(conn net.Conn, msg []byte, cipher cipher.Block) {
 	//send encrypted message to cloud
 	conn.Write(encrypted)
 	conn.Write([]byte("\n"))
-
 }
 
 func main() {
@@ -107,4 +106,5 @@ func main() {
 	//close the connection
 	err = conn.Close()
 	check(err)
+	fmt.Println("Connection Closed")
 }
