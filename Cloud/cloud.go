@@ -134,19 +134,22 @@ func handleConnection(conn net.Conn) {
 	}
 
 	//check if user is whitelisted
-	var sharedKey []byte
+	sharedKey := make([]byte, 32)
 	var inGroup bool = false
 	fi, err := keysFile.Stat()
 	check(err)
 	size := fi.Size()
+	fmt.Println(size)
 	var i int64
-	for i = 96; i < size; i += 128 {
-		storedKey := make([]byte, 128)
-		_, e := keysFile.ReadAt(storedKey, i)
-		check(e)
+	for i = 96; i < size; i += 96 {
+		storedKey := make([]byte, 96)
+		n, err = keysFile.ReadAt(storedKey, i)
+		check(err)
+		fmt.Println(n)
 		if string(userKey) == string(storedKey[:64]) {
 			inGroup = true
 			sharedKey = storedKey[64:]
+
 			break
 		}
 	}
@@ -159,10 +162,12 @@ func handleConnection(conn net.Conn) {
 			sharedKey = GenerateSharedSecret(privateKey, userKey, curve)
 
 			//save public and shared key for future use
-			_, e := keysFile.Write(userKey)
-			check(e)
-			_, err = keysFile.Write(sharedKey)
+			n, err = keysFile.Write(userKey)
 			check(err)
+			fmt.Println(n, " Userkey bytes written")
+			n, err = keysFile.Write(sharedKey[:32])
+			check(err)
+			fmt.Println(n, " Sharedkey bytes written")
 		} else {
 			//encrypt using private key
 			sharedKey = privateKey
